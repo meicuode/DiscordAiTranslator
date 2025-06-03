@@ -437,7 +437,7 @@ ${processedText}`
         return text;
     }
 
-    // 显示翻译结果（支持重试）
+    // 显示翻译结果（支持重试和回复消息）
     function showTranslation(messageElement, translation, isRetry = false) {
         // 移除已存在的翻译
         const existingTranslation = messageElement.querySelector('.discord-translation');
@@ -458,6 +458,8 @@ ${processedText}`
             font-size: 14px;
             line-height: 1.4;
             position: relative;
+            width: calc(100% - 24px);
+            box-sizing: border-box;
         `;
         
         // 创建重试按钮
@@ -508,12 +510,124 @@ ${processedText}`
         
         translationDiv.appendChild(retryButton);
         
-        // 找到合适的位置插入翻译
-        const messageContent = messageElement.querySelector('[class*="messageContent"]');
-        if (messageContent) {
-            messageContent.parentNode.insertBefore(translationDiv, messageContent.nextSibling);
-        } else {
-            messageElement.appendChild(translationDiv);
+        // 智能寻找插入位置
+        function findInsertionPoint(element) {
+            // 方案1: 查找消息内容容器
+            const contentSelectors = [
+                '[class*="messageContent-"]',
+                '[class*="messageContent_"]',
+                '[class*="markup-"]',
+                '[class*="markup_"]',
+                '[class*="content-"]',
+                '[class*="content_"]'
+            ];
+            
+            for (const selector of contentSelectors) {
+                const contentElement = element.querySelector(selector);
+                if (contentElement) {
+                    console.log('找到内容元素用于插入翻译:', selector);
+                    return {
+                        type: 'afterContent',
+                        element: contentElement,
+                        parent: contentElement.parentElement
+                    };
+                }
+            }
+            
+            // 方案2: 查找回复消息的特殊结构
+            const replySelectors = [
+                '[class*="repliedMessage-"]',
+                '[class*="repliedMessage_"]',
+                '[class*="reply-"]',
+                '[class*="reply_"]'
+            ];
+            
+            for (const selector of replySelectors) {
+                const replyElement = element.querySelector(selector);
+                if (replyElement) {
+                    console.log('检测到回复消息结构:', selector);
+                    // 对于回复消息，查找主要内容区域
+                    const mainContent = element.querySelector('[class*="messageContent"]') || 
+                                      element.querySelector('[class*="markup"]');
+                    if (mainContent) {
+                        return {
+                            type: 'afterContent',
+                            element: mainContent,
+                            parent: mainContent.parentElement
+                        };
+                    }
+                }
+            }
+            
+            // 方案3: 查找消息的主要容器
+            const containerSelectors = [
+                '[class*="contents-"]',
+                '[class*="contents_"]',
+                '[class*="container-"]',
+                '[class*="container_"]'
+            ];
+            
+            for (const selector of containerSelectors) {
+                const container = element.querySelector(selector);
+                if (container) {
+                    console.log('找到消息容器:', selector);
+                    return {
+                        type: 'appendToContainer',
+                        element: container,
+                        parent: container
+                    };
+                }
+            }
+            
+            // 方案4: 使用消息元素本身
+            console.log('使用消息元素本身作为插入点');
+            return {
+                type: 'appendToMessage',
+                element: element,
+                parent: element
+            };
+        }
+        
+        const insertionPoint = findInsertionPoint(messageElement);
+        
+        try {
+            switch (insertionPoint.type) {
+                case 'afterContent':
+                    // 在内容元素后插入
+                    insertionPoint.parent.insertBefore(translationDiv, insertionPoint.element.nextSibling);
+                    console.log('翻译结果已插入到内容后面');
+                    break;
+                    
+                case 'appendToContainer':
+                    // 添加到容器末尾
+                    insertionPoint.parent.appendChild(translationDiv);
+                    console.log('翻译结果已添加到容器末尾');
+                    break;
+                    
+                case 'appendToMessage':
+                    // 添加到消息末尾
+                    insertionPoint.parent.appendChild(translationDiv);
+                    console.log('翻译结果已添加到消息末尾');
+                    break;
+            }
+            
+            // 确保翻译结果可见
+            setTimeout(() => {
+                translationDiv.scrollIntoView({ 
+                    behavior: 'smooth', 
+                    block: 'nearest' 
+                });
+            }, 100);
+            
+        } catch (error) {
+            console.error('插入翻译结果失败:', error);
+            // 备用方案：直接添加到消息元素
+            try {
+                messageElement.appendChild(translationDiv);
+                console.log('使用备用方案插入翻译结果');
+            } catch (backupError) {
+                console.error('备用插入方案也失败:', backupError);
+            }
         }
     }
 
@@ -557,70 +671,134 @@ ${processedText}`
                 
                 console.log('为消息添加翻译按钮:', textContent.substring(0, 50) + '...');
                 
-                // 尝试多个位置添加按钮
-                const headerSelectors = [
-                    '[class*="messageHeader-"]',
-                    '[class*="messageHeader_"]',
-                    '[class*="header-"]',
-                    '[class*="header_"]',
-                    '[class*="username"]',
-                    '[class*="timestamp"]'
-                ];
+                // 检测消息类型并相应处理
+                const isReplyMessage = messageElement.querySelector('[class*="repliedMessage"]') || 
+                                     messageElement.querySelector('[class*="reply"]');
                 
-                let buttonAdded = false;
-                
-                for (const headerSelector of headerSelectors) {
-                    const headerElement = messageElement.querySelector(headerSelector);
-                    if (headerElement && !buttonAdded) {
-                        const button = createTranslateButton(messageElement);
-                        
-                        // 创建按钮容器
-                        const buttonContainer = document.createElement('span');
-                        buttonContainer.style.cssText = 'margin-left: 8px; display: inline-block;';
-                        buttonContainer.appendChild(button);
-                        
-                        // 尝试添加到header的父元素或者header本身
-                        try {
-                            if (headerElement.parentElement) {
-                                headerElement.parentElement.appendChild(buttonContainer);
-                            } else {
-                                headerElement.appendChild(buttonContainer);
-                            }
-                            buttonAdded = true;
-                            console.log('按钮已添加到:', headerSelector);
-                            break;
-                        } catch (e) {
-                            console.log('添加按钮失败:', e);
-                        }
-                    }
-                }
-                
-                // 如果header位置添加失败，尝试添加到消息内容附近
-                if (!buttonAdded) {
-                    const contentElement = messageElement.querySelector('[class*="messageContent"], [class*="markup"], div');
-                    if (contentElement) {
-                        const button = createTranslateButton(messageElement);
-                        button.style.cssText += 'margin: 4px 0; display: block;';
-                        
-                        try {
-                            // 添加到内容元素后面
-                            if (contentElement.parentElement) {
-                                contentElement.parentElement.insertBefore(button, contentElement.nextSibling);
-                            } else {
-                                messageElement.appendChild(button);
-                            }
-                            buttonAdded = true;
-                            console.log('按钮已添加到消息内容附近');
-                        } catch (e) {
-                            console.log('添加按钮到内容附近失败:', e);
-                        }
-                    }
-                }
-                
-                if (!buttonAdded) {
-                    console.log('无法为消息添加翻译按钮');
+                if (isReplyMessage) {
+                    console.log('检测到回复消息，使用特殊处理');
+                    addButtonToReplyMessage(messageElement);
+                } else {
+                    console.log('普通消息，使用标准处理');
+                    addButtonToNormalMessage(messageElement);
                 }
             });
+        }
+    }
+    
+    // 为普通消息添加翻译按钮
+    function addButtonToNormalMessage(messageElement) {
+        const headerSelectors = [
+            '[class*="messageHeader-"]',
+            '[class*="messageHeader_"]',
+            '[class*="header-"]',
+            '[class*="header_"]',
+            '[class*="username"]',
+            '[class*="timestamp"]'
+        ];
+        
+        let buttonAdded = false;
+        
+        for (const headerSelector of headerSelectors) {
+            const headerElement = messageElement.querySelector(headerSelector);
+            if (headerElement && !buttonAdded) {
+                const button = createTranslateButton(messageElement);
+                
+                // 创建按钮容器
+                const buttonContainer = document.createElement('span');
+                buttonContainer.style.cssText = 'margin-left: 8px; display: inline-block;';
+                buttonContainer.appendChild(button);
+                
+                try {
+                    if (headerElement.parentElement) {
+                        headerElement.parentElement.appendChild(buttonContainer);
+                    } else {
+                        headerElement.appendChild(buttonContainer);
+                    }
+                    buttonAdded = true;
+                    console.log('按钮已添加到:', headerSelector);
+                    break;
+                } catch (e) {
+                    console.log('添加按钮失败:', e);
+                }
+            }
+        }
+        
+        if (!buttonAdded) {
+            addButtonToContentArea(messageElement);
+        }
+    }
+    
+    // 为回复消息添加翻译按钮
+    function addButtonToReplyMessage(messageElement) {
+        // 回复消息的按钮放置策略
+        const replyHeaderSelectors = [
+            '[class*="username"]',
+            '[class*="timestamp"]',
+            '[class*="messageHeader"]'
+        ];
+        
+        let buttonAdded = false;
+        
+        // 尝试在回复消息的头部添加按钮
+        for (const selector of replyHeaderSelectors) {
+            const elements = messageElement.querySelectorAll(selector);
+            // 取最后一个元素（通常是主消息的头部，而不是被回复消息的头部）
+            const headerElement = elements[elements.length - 1];
+            
+            if (headerElement && !buttonAdded) {
+                const button = createTranslateButton(messageElement);
+                button.style.cssText += 'margin-left: 8px; font-size: 11px; padding: 1px 6px;';
+                
+                try {
+                    // 查找合适的父容器
+                    let container = headerElement.parentElement;
+                    while (container && !container.querySelector('[class*="messageContent"]')) {
+                        container = container.parentElement;
+                        if (container === messageElement) break;
+                    }
+                    
+                    if (container && container !== messageElement) {
+                        container.appendChild(button);
+                        buttonAdded = true;
+                        console.log('回复消息按钮已添加');
+                        break;
+                    }
+                } catch (e) {
+                    console.log('回复消息按钮添加失败:', e);
+                }
+            }
+        }
+        
+        if (!buttonAdded) {
+            addButtonToContentArea(messageElement);
+        }
+    }
+    
+    // 添加按钮到内容区域（备用方案）
+    function addButtonToContentArea(messageElement) {
+        const contentElement = messageElement.querySelector('[class*="messageContent"], [class*="markup"], div');
+        if (contentElement) {
+            const button = createTranslateButton(messageElement);
+            button.style.cssText += 'margin: 4px 0; display: block; float: right; clear: both;';
+            
+            try {
+                // 查找内容区域的父容器
+                const contentParent = contentElement.parentElement;
+                if (contentParent) {
+                    // 创建按钮容器
+                    const buttonWrapper = document.createElement('div');
+                    buttonWrapper.style.cssText = 'clear: both; text-align: right; margin-top: 4px;';
+                    buttonWrapper.appendChild(button);
+                    
+                    contentParent.appendChild(buttonWrapper);
+                    console.log('按钮已添加到内容区域');
+                } else {
+                    messageElement.appendChild(button);
+                }
+            } catch (e) {
+                console.log('添加按钮到内容区域失败:', e);
+            }
         }
     }
 
