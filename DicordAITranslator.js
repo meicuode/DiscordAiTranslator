@@ -126,22 +126,30 @@
         }, 3000);
     }
 
-    // 调用Gemini API进行翻译
+    // 调用Gemini API进行翻译（增强多行支持）
     async function translateText(text) {
         if (!API_KEY) {
             showNotification('请先设置API Key！');
             return null;
         }
 
+        // 预处理文本，保持格式
+        const processedText = text.trim();
+        if (!processedText) {
+            throw new Error('文本内容为空');
+        }
+
         const requestBody = {
             contents: [{
                 parts: [{
-                    text: `请将以下文本翻译成${getLanguageName(TARGET_LANGUAGE)}，只返回翻译结果，不要添加任何解释或格式：\n\n${text}`
+                    text: `请将以下文本翻译成${getLanguageName(TARGET_LANGUAGE)}。保持原文的换行和段落格式，只返回翻译结果，不要添加任何解释、引号或格式标记：
+
+${processedText}`
                 }]
             }],
             generationConfig: {
                 temperature: 0.1,
-                maxOutputTokens: 1024,
+                maxOutputTokens: 2048,
             }
         };
 
@@ -153,21 +161,40 @@
                     'Content-Type': 'application/json',
                 },
                 data: JSON.stringify(requestBody),
+                timeout: 30000, // 30秒超时
                 onload: function(response) {
                     try {
+                        if (response.status !== 200) {
+                            reject(`API请求失败 (${response.status}): ${response.statusText}`);
+                            return;
+                        }
+
                         const data = JSON.parse(response.responseText);
+                        
+                        if (data.error) {
+                            reject(`API错误: ${data.error.message || '未知错误'}`);
+                            return;
+                        }
+                        
                         if (data.candidates && data.candidates[0] && data.candidates[0].content) {
                             const translatedText = data.candidates[0].content.parts[0].text.trim();
-                            resolve(translatedText);
+                            if (translatedText) {
+                                resolve(translatedText);
+                            } else {
+                                reject('翻译结果为空');
+                            }
                         } else {
-                            reject('翻译失败：无效响应');
+                            reject('API返回格式异常');
                         }
                     } catch (error) {
-                        reject('翻译失败：' + error.message);
+                        reject('响应解析失败: ' + error.message);
                     }
                 },
                 onerror: function(error) {
-                    reject('网络错误：' + error);
+                    reject('网络连接失败');
+                },
+                ontimeout: function() {
+                    reject('请求超时，请重试');
                 }
             });
         });
@@ -283,69 +310,131 @@
 
     // 获取消息文本内容（支持多行）
     function getMessageText(messageElement) {
-        // Discord消息内容通常在这些选择器中
+        console.log('正在提取消息文本...', messageElement);
+        
+        // 更全面的Discord消息内容选择器
         const contentSelectors = [
-            '[class*="messageContent"]',
-            '[class*="markup"]',
-            '[data-slate-editor="true"]'
+            // 新版Discord选择器
+            '[class*="messageContent-"]',
+            '[class*="messageContent_"]', 
+            '[class*="markup-"]',
+            '[class*="markup_"]',
+            '[data-slate-editor="true"]',
+            // 旧版Discord选择器
+            '.messageContent',
+            '.markup',
+            // 通用选择器
+            '[class*="content"]',
+            '[class*="text"]'
         ];
         
+        let contentElement = null;
+        
+        // 尝试所有选择器
         for (const selector of contentSelectors) {
-            const contentElement = messageElement.querySelector(selector);
+            contentElement = messageElement.querySelector(selector);
             if (contentElement) {
-                // 保留换行和段落结构
-                let text = '';
-                
-                // 处理不同类型的节点
-                function extractText(node) {
-                    if (node.nodeType === Node.TEXT_NODE) {
-                        return node.textContent;
-                    } else if (node.nodeType === Node.ELEMENT_NODE) {
-                        const tagName = node.tagName.toLowerCase();
-                        
-                        // 处理换行标签
-                        if (tagName === 'br') {
-                            return '\n';
-                        }
-                        
-                        // 处理块级元素，在前后添加换行
-                        if (['div', 'p', 'pre', 'blockquote'].includes(tagName)) {
-                            let content = '';
-                            for (const child of node.childNodes) {
-                                content += extractText(child);
-                            }
-                            return content + '\n';
-                        }
-                        
-                        // 处理代码块
-                        if (tagName === 'code' && node.parentElement?.tagName.toLowerCase() === 'pre') {
-                            let content = '';
-                            for (const child of node.childNodes) {
-                                content += extractText(child);
-                            }
-                            return content;
-                        }
-                        
-                        // 其他元素递归处理
-                        let content = '';
-                        for (const child of node.childNodes) {
-                            content += extractText(child);
-                        }
-                        return content;
-                    }
-                    return '';
-                }
-                
-                text = extractText(contentElement);
-                
-                // 清理多余的换行，但保留段落结构
-                text = text.replace(/\n{3,}/g, '\n\n').trim();
-                
-                return text;
+                console.log('找到内容元素:', selector, contentElement);
+                break;
             }
         }
         
-        return '';
+        // 如果没找到，尝试查找所有可能的文本容器
+        if (!contentElement) {
+            const allDivs = messageElement.querySelectorAll('div');
+            for (const div of allDivs) {
+                // 检查div是否包含实际文本内容（排除只有空白的div）
+                if (div.textContent && div.textContent.trim().length > 0) {
+                    // 排除一些明显不是消息内容的元素
+                    const className = div.className || '';
+                    if (!className.includes('timestamp') && 
+                        !className.includes('username') && 
+                        !className.includes('avatar') &&
+                        !className.includes('header') &&
+                        !className.includes('button')) {
+                        contentElement = div;
+                        console.log('通过div查找找到内容:', div);
+                        break;
+                    }
+                }
+            }
+        }
+        
+        if (!contentElement) {
+            console.log('未找到消息内容元素');
+            return '';
+        }
+        
+        // 深度提取文本内容，保留格式
+        function extractText(node) {
+            if (!node) return '';
+            
+            if (node.nodeType === Node.TEXT_NODE) {
+                return node.textContent || '';
+            } 
+            
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                const tagName = node.tagName.toLowerCase();
+                
+                // 跳过一些不需要的元素
+                if (['script', 'style', 'noscript'].includes(tagName)) {
+                    return '';
+                }
+                
+                // 处理换行标签
+                if (tagName === 'br') {
+                    return '\n';
+                }
+                
+                // 处理块级元素
+                if (['div', 'p', 'pre', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tagName)) {
+                    let content = '';
+                    for (const child of node.childNodes) {
+                        content += extractText(child);
+                    }
+                    // 只在内容不为空时添加换行
+                    return content.trim() ? content + '\n' : content;
+                }
+                
+                // 处理列表项
+                if (tagName === 'li') {
+                    let content = '';
+                    for (const child of node.childNodes) {
+                        content += extractText(child);
+                    }
+                    return '• ' + content.trim() + '\n';
+                }
+                
+                // 处理代码块
+                if (tagName === 'code') {
+                    let content = '';
+                    for (const child of node.childNodes) {
+                        content += extractText(child);
+                    }
+                    return content;
+                }
+                
+                // 其他内联元素
+                let content = '';
+                for (const child of node.childNodes) {
+                    content += extractText(child);
+                }
+                return content;
+            }
+            
+            return '';
+        }
+        
+        let text = extractText(contentElement);
+        
+        // 清理文本
+        text = text
+            .replace(/\n{3,}/g, '\n\n')  // 清理多余换行
+            .replace(/[ \t]+/g, ' ')     // 清理多余空格
+            .trim();
+        
+        console.log('提取的文本内容:', text);
+        return text;
     }
 
     // 显示翻译结果（支持重试）
@@ -430,30 +519,106 @@
 
     // 监听消息变化并添加翻译按钮
     function addTranslateButtons() {
-        // Discord消息的选择器
+        // 更全面的Discord消息选择器
         const messageSelectors = [
-            '[class*="message-"]',
-            '[class*="messageListItem"]',
-            '[id^="chat-messages-"]'
+            // 新版Discord消息选择器
+            '[class*="message-"][class*="cozy-"]',
+            '[class*="message_"][class*="cozy_"]',
+            '[class*="messageListItem-"]',
+            '[class*="messageListItem_"]',
+            '[id^="chat-messages-"]',
+            '[id^="message-"]',
+            // 通用消息选择器
+            '[class*="message"]',
+            'li[class*="message"]',
+            'div[class*="message"]'
         ];
+        
+        const processedMessages = new Set();
         
         for (const selector of messageSelectors) {
             const messages = document.querySelectorAll(selector);
+            console.log(`找到 ${messages.length} 条消息 (选择器: ${selector})`);
+            
             messages.forEach(messageElement => {
+                // 避免重复处理同一消息
+                if (processedMessages.has(messageElement)) return;
+                processedMessages.add(messageElement);
+                
                 // 检查是否已经添加了按钮
                 if (messageElement.querySelector('.discord-translate-btn')) return;
                 
                 // 检查是否有消息内容
-                const hasContent = getMessageText(messageElement).trim().length > 0;
-                if (!hasContent) return;
+                const textContent = getMessageText(messageElement);
+                if (!textContent.trim() || textContent.length < 2) {
+                    console.log('消息内容为空或太短，跳过:', textContent);
+                    return;
+                }
                 
-                // 找到合适的位置添加按钮
-                const headerElement = messageElement.querySelector('[class*="messageHeader"]') || 
-                                    messageElement.querySelector('[class*="username"]')?.parentElement;
+                console.log('为消息添加翻译按钮:', textContent.substring(0, 50) + '...');
                 
-                if (headerElement) {
-                    const button = createTranslateButton(messageElement);
-                    headerElement.appendChild(button);
+                // 尝试多个位置添加按钮
+                const headerSelectors = [
+                    '[class*="messageHeader-"]',
+                    '[class*="messageHeader_"]',
+                    '[class*="header-"]',
+                    '[class*="header_"]',
+                    '[class*="username"]',
+                    '[class*="timestamp"]'
+                ];
+                
+                let buttonAdded = false;
+                
+                for (const headerSelector of headerSelectors) {
+                    const headerElement = messageElement.querySelector(headerSelector);
+                    if (headerElement && !buttonAdded) {
+                        const button = createTranslateButton(messageElement);
+                        
+                        // 创建按钮容器
+                        const buttonContainer = document.createElement('span');
+                        buttonContainer.style.cssText = 'margin-left: 8px; display: inline-block;';
+                        buttonContainer.appendChild(button);
+                        
+                        // 尝试添加到header的父元素或者header本身
+                        try {
+                            if (headerElement.parentElement) {
+                                headerElement.parentElement.appendChild(buttonContainer);
+                            } else {
+                                headerElement.appendChild(buttonContainer);
+                            }
+                            buttonAdded = true;
+                            console.log('按钮已添加到:', headerSelector);
+                            break;
+                        } catch (e) {
+                            console.log('添加按钮失败:', e);
+                        }
+                    }
+                }
+                
+                // 如果header位置添加失败，尝试添加到消息内容附近
+                if (!buttonAdded) {
+                    const contentElement = messageElement.querySelector('[class*="messageContent"], [class*="markup"], div');
+                    if (contentElement) {
+                        const button = createTranslateButton(messageElement);
+                        button.style.cssText += 'margin: 4px 0; display: block;';
+                        
+                        try {
+                            // 添加到内容元素后面
+                            if (contentElement.parentElement) {
+                                contentElement.parentElement.insertBefore(button, contentElement.nextSibling);
+                            } else {
+                                messageElement.appendChild(button);
+                            }
+                            buttonAdded = true;
+                            console.log('按钮已添加到消息内容附近');
+                        } catch (e) {
+                            console.log('添加按钮到内容附近失败:', e);
+                        }
+                    }
+                }
+                
+                if (!buttonAdded) {
+                    console.log('无法为消息添加翻译按钮');
                 }
             });
         }
@@ -500,25 +665,43 @@
             if (window.location.href.includes('discord.com') && document.querySelector('[class*="app-"]')) {
                 clearInterval(checkReady);
                 
+                console.log('Discord翻译助手开始初始化...');
+                
                 // 创建设置按钮
                 createSettingsButton();
                 
                 // 初始添加翻译按钮
                 setTimeout(() => {
+                    console.log('开始添加翻译按钮...');
                     addTranslateButtons();
-                }, 2000);
+                }, 3000); // 增加等待时间确保页面完全加载
                 
                 // 监听DOM变化，为新消息添加翻译按钮
                 const observer = new MutationObserver((mutations) => {
                     let shouldCheck = false;
                     mutations.forEach((mutation) => {
                         if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                            shouldCheck = true;
+                            // 检查是否有新的消息节点
+                            for (const node of mutation.addedNodes) {
+                                if (node.nodeType === Node.ELEMENT_NODE) {
+                                    // 检查节点本身或其子节点是否包含消息
+                                    if (node.querySelector && (
+                                        node.matches('[class*="message"]') ||
+                                        node.querySelector('[class*="message"]') ||
+                                        node.matches('[id^="message-"]') ||
+                                        node.querySelector('[id^="message-"]')
+                                    )) {
+                                        shouldCheck = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     });
                     
                     if (shouldCheck) {
-                        setTimeout(addTranslateButtons, 100);
+                        console.log('检测到新消息，添加翻译按钮...');
+                        setTimeout(addTranslateButtons, 500);
                     }
                 });
                 
@@ -526,6 +709,11 @@
                     childList: true,
                     subtree: true
                 });
+                
+                // 定期检查并添加翻译按钮（备用机制）
+                setInterval(() => {
+                    addTranslateButtons();
+                }, 10000); // 每10秒检查一次
                 
                 console.log('Discord翻译助手已加载');
             }
